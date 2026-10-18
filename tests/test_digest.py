@@ -20,6 +20,14 @@ def test_digest_groups_by_source_in_feed_order():
     assert "### [b1](<https://example.com>) · 2026-10-01" in md
 
 
+def test_feeds_with_the_same_title_get_separate_sections():
+    first = make("Blog", "from feed one")
+    second = make("Blog", "from feed two")
+    first.feed_url, second.feed_url = "https://one.example/rss", "https://two.example/rss"
+    md = build_digest([first, second])
+    assert md.count("## Blog") == 2
+
+
 def test_digest_handles_missing_text_and_empty_input():
     md = build_digest([make("Blog", "t", text="")])
     assert "_No text available in the feed._" in md
@@ -79,3 +87,15 @@ def test_cli_non_utf8_feed_file_returns_error(tmp_path):
 def test_cli_rejects_values_below_one(flag):
     with pytest.raises(SystemExit):
         main([flag, "0"])
+
+
+def test_cli_full_text_flag_fills_short_articles(tmp_path, monkeypatch, capsys):
+    feeds_file = tmp_path / "feeds.txt"
+    feeds_file.write_text("https://example.com/feed\n")
+    monkeypatch.setattr("rss_digest.cli.fetch_all", lambda urls, limit: [make("Blog", "Hello")])
+    called = []
+    monkeypatch.setattr("rss_digest.cli.fill_short_articles", lambda articles: called.append(1) or articles)
+    main(["--feeds", str(feeds_file)])
+    assert called == []
+    main(["--feeds", str(feeds_file), "--full-text"])
+    assert called == [1]

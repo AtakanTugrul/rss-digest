@@ -45,12 +45,14 @@ Options:
 | `--limit N` | `3` | Latest posts to take from each feed |
 | `--sentences N` | `2` | Sentences per summary |
 | `-o, --output PATH` | stdout | Write the digest to a file |
+| `--full-text` | off | When a feed only has a short excerpt, fetch the article page and summarize its text |
 
 Edit [`feeds.txt`](feeds.txt) to follow different blogs. A feed that is down or
 broken is skipped with a warning; the rest of the digest is still produced.
 
 Feed content is treated as untrusted: titles and summaries are Markdown-escaped,
-only `http(s)` links are rendered, and downloads are capped at 5 MB.
+only `http(s)` links are rendered and followed (redirects included), feeds that
+declare XML entities are refused, and downloads are capped at 5 MB.
 
 ## How the summarizer works
 
@@ -68,8 +70,9 @@ only `http(s)` links are rendered, and downloads are capped at 5 MB.
 
 Extractive means the summary only uses sentences from the post itself, so it
 never invents facts — the trade-off is that it can't rephrase. Many feeds only
-include a short excerpt rather than the full post, so summaries are limited to
-what the feed provides.
+include a short excerpt rather than the full post; with `--full-text` the tool
+then fetches the post's page and keeps the paragraphs inside `<article>`/`<main>`,
+skipping navigation, headers, footers and sidebars.
 
 ## Project layout
 
@@ -77,6 +80,7 @@ what the feed provides.
 rss_digest/
   feeds.py        fetch feeds, parse entries, strip HTML
   summarizer.py   extractive summarizer
+  fulltext.py     fetch the article page when the feed text is short
   digest.py       Markdown rendering
   cli.py          command-line interface
 tests/            unit tests (no network needed)
@@ -95,7 +99,6 @@ offline in well under a second.
 
 ## Possible next steps
 
-- Fetch the full article page when a feed only has a title or a short excerpt
 - Skip posts already included in a previous digest
 - Run daily with GitHub Actions and commit the digest
 

@@ -109,23 +109,57 @@ class _FakeResponse(io.BytesIO):
         return False
 
 
+class _FakeOpener:
+    def __init__(self, body):
+        self.body = body
+        self.seen = {}
+
+    def open(self, request, timeout):
+        self.seen = {"agent": request.get_header("User-agent"), "timeout": timeout}
+        return _FakeResponse(self.body)
+
+
 def test_download_sends_user_agent_and_timeout(monkeypatch):
-    seen = {}
-
-    def fake_urlopen(request, timeout, context):
-        seen["agent"] = request.get_header("User-agent")
-        seen["timeout"] = timeout
-        return _FakeResponse(b"<rss/>")
-
-    monkeypatch.setattr(feeds, "_ssl_context", lambda: None)
-    monkeypatch.setattr(feeds.urllib.request, "urlopen", fake_urlopen)
+    opener = _FakeOpener(b"<rss/>")
+    monkeypatch.setattr(feeds, "_opener", lambda: opener)
     assert feeds.download("https://example.com/feed") == b"<rss/>"
-    assert seen == {"agent": feeds.USER_AGENT, "timeout": feeds.TIMEOUT_SECONDS}
+    assert opener.seen == {"agent": feeds.USER_AGENT, "timeout": feeds.TIMEOUT_SECONDS}
 
 
 def test_download_rejects_oversized_feed(monkeypatch):
     monkeypatch.setattr(feeds, "MAX_FEED_BYTES", 10)
-    monkeypatch.setattr(feeds, "_ssl_context", lambda: None)
-    monkeypatch.setattr(feeds.urllib.request, "urlopen", lambda *a, **k: _FakeResponse(b"x" * 11))
+    monkeypatch.setattr(feeds, "_opener", lambda: _FakeOpener(b"x" * 11))
     with pytest.raises(ValueError, match="larger than"):
         feeds.download("https://example.com/feed")
+
+
+@pytest.mark.parametrize("target", ["ftp://example.com/feed", "file:///etc/passwd"])
+def test_redirects_to_non_http_urls_are_refused(target):
+    handler = feeds._HttpOnlyRedirectHandler()
+    request = feeds.urllib.request.Request("https://example.com/feed")
+    with pytest.raises(ValueError):
+        handler.redirect_request(request, None, 302, "Found", {}, target)
+
+
+def test_redirects_to_https_are_followed():
+    handler = feeds._HttpOnlyRedirectHandler()
+    request = feeds.urllib.request.Request("http://example.com/feed")
+    new = handler.redirect_request(request, None, 301, "Moved", {}, "https://example.com/feed")
+    assert new.full_url == "https://example.com/feed"
+
+
+def test_parse_feed_rejects_entity_declarations():
+    bomb = '<?xml version="1.0"?><!DOCTYPE rss [<!ENTITY a "lol">]><rss><channel><title>&a;</title></channel></rss>'
+    with pytest.raises(ValueError, match="entities"):
+        parse_feed(bomb.encode())
+
+
+def test_html_to_text_separates_table_cells_and_list_items():
+    assert html_to_text("<table><tr><td>a</td><td>b</td></tr></table><ul><li>x</li></ul>") == "a\nb\nx"
+
+
+def test_untitled_feed_is_named_after_its_host():
+    feed = '<rss version="2.0"><channel><item><title>t</title><description>d</description></item></channel></rss>'
+    [article] = parse_feed(feed, feed_url="https://blog.example.com/rss")
+    assert article.source == "blog.example.com"
+    assert article.feed_url == "https://blog.example.com/rss"

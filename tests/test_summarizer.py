@@ -48,3 +48,12 @@ def test_summary_picks_on_topic_sentences_in_original_order():
     assert len(sentences) == 2
     # Original order is preserved.
     assert text.index(sentences[0]) < text.index(sentences[1])
+
+
+def test_split_sentences_keeps_abbreviations_and_initials_together():
+    text = "Dr. Smith joined the U.S. Army in 2020. Then he left. See Fig. 3 for details."
+    assert split_sentences(text) == [
+        "Dr. Smith joined the U.S. Army in 2020.",
+        "Then he left.",
+        "See Fig. 3 for details.",
+    ]

@@ -22,7 +22,11 @@ TIMEOUT_SECONDS = 15
 MAX_FEED_BYTES = 5 * 1024 * 1024
 
 # Tags whose end should be treated as a break between words/sentences.
-_BLOCK_TAGS = {"p", "br", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "tr", "blockquote"}
+_BLOCK_TAGS = {
+    "p", "br", "hr", "div", "section", "article", "header", "footer", "main", "aside",
+    "ul", "ol", "li", "dl", "dt", "dd", "table", "tr", "td", "th", "caption",
+    "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "figure", "figcaption",
+}
 # Code blocks don't summarize well, so they are dropped along with scripts and styles.
 _SKIP_TAGS = {"script", "style", "pre"}
 
@@ -34,6 +38,9 @@ class Article:
     link: str
     published: datetime | None
     text: str
+    # The URL the article's feed was fetched from; identifies the feed even when
+    # two feeds share a title.
+    feed_url: str = ""
 
 
 class _TextExtractor(HTMLParser):
@@ -93,32 +100,50 @@ def load_feed_urls(path: str | Path) -> list[str]:
     return urls
 
 
+def _check_http_url(url: str) -> None:
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise ValueError(f"only http(s) URLs are supported: {url}")
+
+
+class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only to http(s); urllib would otherwise also follow ftp://."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_http_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 @functools.cache
-def _ssl_context() -> ssl.SSLContext:
+def _opener() -> urllib.request.OpenerDirector:
     # Use certifi's CA bundle so HTTPS works even where the system Python has no
     # certificates configured (common with python.org installers on macOS).
     # Built on first download, so importing the package never touches the file.
-    return ssl.create_default_context(cafile=certifi.where())
+    context = ssl.create_default_context(cafile=certifi.where())
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _HttpOnlyRedirectHandler)
 
 
 def download(url: str) -> bytes:
-    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
-        raise ValueError(f"only http(s) feed URLs are supported: {url}")
+    """Download a feed or page over http(s), refusing anything over MAX_FEED_BYTES."""
+    _check_http_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS, context=_ssl_context()) as response:
+    with _opener().open(request, timeout=TIMEOUT_SECONDS) as response:
         data = response.read(MAX_FEED_BYTES + 1)
     if len(data) > MAX_FEED_BYTES:
-        raise ValueError(f"feed is larger than {MAX_FEED_BYTES // (1024 * 1024)} MB")
+        raise ValueError(f"response is larger than {MAX_FEED_BYTES // (1024 * 1024)} MB")
     return data
 
 
-def parse_feed(raw: bytes | str, limit: int | None = None) -> list[Article]:
+def parse_feed(raw: bytes | str, limit: int | None = None, feed_url: str = "") -> list[Article]:
     """Parse feed content (RSS or Atom) into articles, newest entries first as given by the feed."""
+    # Real feeds don't declare their own entities; refusing them rules out
+    # "billion laughs" style expansion regardless of the XML parser version.
+    if (b"<!ENTITY" if isinstance(raw, bytes) else "<!ENTITY") in raw:
+        raise ValueError("feeds that declare XML entities are not supported")
     feed = feedparser.parse(raw)
     if feed.bozo and not feed.entries:
         raise ValueError(f"could not parse feed: {feed.get('bozo_exception')}")
 
-    source = feed.feed.get("title", "Unknown feed")
+    source = feed.feed.get("title") or urllib.parse.urlparse(feed_url).netloc or "Unknown feed"
     articles = []
     for entry in feed.entries[:limit]:
         # Prefer full content; fall back to the summary most feeds provide.
@@ -133,13 +158,14 @@ def parse_feed(raw: bytes | str, limit: int | None = None) -> list[Article]:
                 link=entry.get("link", ""),
                 published=_entry_datetime(entry),
                 text=html_to_text(body),
+                feed_url=feed_url,
             )
         )
     return articles
 
 
 def fetch_feed(url: str, limit: int | None = None) -> list[Article]:
-    return parse_feed(download(url), limit=limit)
+    return parse_feed(download(url), limit=limit, feed_url=url)
 
 
 def fetch_all(urls: list[str], limit: int | None = None) -> list[Article]:

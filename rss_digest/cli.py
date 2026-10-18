@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .digest import build_digest
 from .feeds import fetch_all, load_feed_urls
+from .fulltext import fill_short_articles
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -20,6 +21,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=3, help="latest posts to take from each feed (default: 3)")
     parser.add_argument("--sentences", type=int, default=2, help="sentences per summary (default: 2)")
     parser.add_argument("-o", "--output", help="write the digest to this file instead of stdout")
+    parser.add_argument(
+        "--full-text",
+        action="store_true",
+        help="when a feed only has a short excerpt, fetch the article page instead",
+    )
     args = parser.parse_args(argv)
     if args.limit < 1 or args.sentences < 1:
         parser.error("--limit and --sentences must be at least 1")
@@ -37,6 +43,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     articles = fetch_all(urls, limit=args.limit)
+    if args.full_text:
+        articles = fill_short_articles(articles)
     digest = build_digest(articles, max_sentences=args.sentences)
 
     if args.output:

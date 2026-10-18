@@ -42,13 +42,14 @@ def build_digest(articles: list[Article], max_sentences: int = 2, today: date | 
         lines.append("_No articles found._")
         return "\n".join(lines) + "\n"
 
-    # Group by source, keeping the order in which feeds were listed.
-    by_source: dict[str, list[Article]] = {}
+    # Group by feed, keeping the order in which feeds were listed. The feed URL is
+    # the key, so two feeds with the same title still get their own sections.
+    by_feed: dict[str, list[Article]] = {}
     for article in articles:
-        by_source.setdefault(article.source, []).append(article)
+        by_feed.setdefault(article.feed_url or article.source, []).append(article)
 
-    for source, group in by_source.items():
-        lines += [f"## {escape_markdown(source)}", ""]
+    for group in by_feed.values():
+        lines += [f"## {escape_markdown(group[0].source)}", ""]
         for article in group:
             title = escape_markdown(article.title)
             url = safe_url(article.link)
