@@ -1,0 +1,5 @@
+# One RSS/Atom feed URL per line. Lines starting with # are ignored.
+https://www.technologyreview.com/topic/artificial-intelligence/feed
+https://bair.berkeley.edu/blog/feed.xml
+https://blog.google/technology/ai/rss/
+https://simonwillison.net/atom/everything/

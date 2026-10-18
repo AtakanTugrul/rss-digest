@@ -1,0 +1,2 @@
+feedparser==6.0.14
+certifi==2026.10.18

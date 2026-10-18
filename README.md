@@ -1,0 +1,104 @@
+# rss-digest
+
+A small command-line tool that fetches RSS/Atom feeds from AI blogs and turns
+the latest posts into a short Markdown digest — with a summarizer written from
+scratch, no paid APIs or ML models.
+
+```
+feeds.txt ──► fetch & parse (feedparser) ──► HTML → plain text ──► extractive summary ──► digest.md
+```
+
+## Example output
+
+```markdown
+# AI Blog Digest — 2026-10-18
+
+## Example AI Lab Blog
+
+### [Teaching small models to say "I don't know"](<https://example.com/blog/small-models-uncertainty>) · 2026-10-13
+
+Small language models often answer confidently even when they are wrong. We trained a
+3B-parameter model to flag low-confidence answers and cut its error rate on unanswerable
+questions by half.
+```
+
+*(The sample above is made up for illustration; real output uses the posts from your feeds.)*
+
+## Quick start
+
+Requires Python 3.10+.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+python -m rss_digest                      # print the digest to the terminal
+python -m rss_digest -o output/digest.md  # or save it to a file
+```
+
+Options:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--feeds PATH` | `feeds.txt` | File with one feed URL per line (`#` starts a comment) |
+| `--limit N` | `3` | Latest posts to take from each feed |
+| `--sentences N` | `2` | Sentences per summary |
+| `-o, --output PATH` | stdout | Write the digest to a file |
+
+Edit [`feeds.txt`](feeds.txt) to follow different blogs. A feed that is down or
+broken is skipped with a warning; the rest of the digest is still produced.
+
+Feed content is treated as untrusted: titles and summaries are Markdown-escaped,
+only `http(s)` links are rendered, and downloads are capped at 5 MB.
+
+## How the summarizer works
+
+[`rss_digest/summarizer.py`](rss_digest/summarizer.py) implements a classic
+**frequency-based extractive summarizer**:
+
+1. Split the post into sentences.
+2. Count how often each meaningful word appears in the whole post (common
+   words like "the" or "and", numbers, and parenthesized citations are ignored).
+3. Score each sentence by the average frequency of its words, divided by the
+   square root of its length so long sentences don't win just by being long.
+   The first two sentences get a small boost, since posts usually open with
+   their main point.
+4. Return the top-scoring sentences **in their original order**.
+
+Extractive means the summary only uses sentences from the post itself, so it
+never invents facts — the trade-off is that it can't rephrase. Many feeds only
+include a short excerpt rather than the full post, so summaries are limited to
+what the feed provides.
+
+## Project layout
+
+```
+rss_digest/
+  feeds.py        fetch feeds, parse entries, strip HTML
+  summarizer.py   extractive summarizer
+  digest.py       Markdown rendering
+  cli.py          command-line interface
+tests/            unit tests (no network needed)
+feeds.txt         feed list
+```
+
+## Running the tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The tests use inline sample feeds and stub out the network, so they run
+offline in well under a second.
+
+## Possible next steps
+
+- Fetch the full article page when a feed only has a title or a short excerpt
+- Skip posts already included in a previous digest
+- Run daily with GitHub Actions and commit the digest
+
+## License
+
+MIT
