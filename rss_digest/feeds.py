@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import functools
+import http.client
 import ipaddress
 import logging
 import socket
 import ssl
+import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -20,7 +22,8 @@ import feedparser
 logger = logging.getLogger(__name__)
 
 USER_AGENT = "rss-digest/0.1"
-TIMEOUT_SECONDS = 15
+TIMEOUT_SECONDS = 15  # per connect/read
+MAX_DOWNLOAD_SECONDS = 30
 MAX_FEED_BYTES = 5 * 1024 * 1024
 
 # Tags whose end should be treated as a break between words/sentences.
@@ -121,9 +124,58 @@ def _check_public_host(url: str) -> None:
     if not host:
         raise ValueError(f"URL has no host: {url}")
     for *_, sockaddr in socket.getaddrinfo(host, None):
-        address = ipaddress.ip_address(sockaddr[0].split("%", 1)[0])
-        if not address.is_global:
-            raise ValueError(f"refusing non-public address {address} for {url}")
+        _check_public_address(sockaddr[0], url)
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_COMPATIBLE = ipaddress.ip_network("::/96")
+
+
+def _check_public_address(address: str, url: str) -> None:
+    ip = ipaddress.ip_address(address.split("%", 1)[0])  # drop an IPv6 zone like "%en0"
+    if ip.version == 6:
+        # IPv6 forms that carry an IPv4 address ("::ffff:127.0.0.1", 6to4, NAT64)
+        # are judged by the IPv4 address inside them.
+        embedded = ip.ipv4_mapped or ip.sixtofour
+        if embedded is None and (ip in _NAT64 or ip in _IPV4_COMPATIBLE):
+            embedded = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        ip = embedded or ip
+    if not ip.is_global:
+        raise ValueError(f"refusing non-public address {ip} for {url}")
+
+
+class _PublicPeerMixin:
+    """Check the address actually connected to, not just what DNS said earlier.
+
+    A hostile DNS server could answer the up-front check with a public address
+    and the real connection with 127.0.0.1 ("DNS rebinding"); this closes that gap.
+    """
+
+    def connect(self):
+        super().connect()
+        try:
+            _check_public_address(self.sock.getpeername()[0], self.host)
+        except ValueError:
+            self.sock.close()
+            raise
+
+
+class _PublicHTTPConnection(_PublicPeerMixin, http.client.HTTPConnection):
+    pass
+
+
+class _PublicHTTPSConnection(_PublicPeerMixin, http.client.HTTPSConnection):
+    pass
+
+
+class _PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PublicHTTPConnection, req)
+
+
+class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PublicHTTPSConnection, req, context=self._context)
 
 
 class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -141,26 +193,66 @@ class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 @functools.cache
-def _opener() -> urllib.request.OpenerDirector:
+def _ssl_context() -> ssl.SSLContext:
     # Use certifi's CA bundle so HTTPS works even where the system Python has no
     # certificates configured (common with python.org installers on macOS).
     # Built on first download, so importing the package never touches the file.
-    context = ssl.create_default_context(cafile=certifi.where())
-    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _HttpOnlyRedirectHandler)
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+@functools.cache
+def _opener() -> urllib.request.OpenerDirector:
+    return urllib.request.build_opener(urllib.request.HTTPSHandler(context=_ssl_context()), _HttpOnlyRedirectHandler)
+
+
+@functools.cache
+def _public_opener() -> urllib.request.OpenerDirector:
+    # No proxy, so the peer address checked on connect is the real server's.
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _PublicHTTPHandler,
+        _PublicHTTPSHandler(context=_ssl_context()),
+        _HttpOnlyRedirectHandler,
+    )
 
 
 def download(url: str, public_only: bool = False) -> bytes:
-    """Download a feed or page over http(s), refusing anything over MAX_FEED_BYTES.
+    """Download a feed or page over http(s), refusing anything over MAX_FEED_BYTES
+    or taking longer than MAX_DOWNLOAD_SECONDS.
 
-    With public_only, the URL and every redirect must point to a public address;
-    used for links taken from feed content rather than from the user's feed list.
+    With public_only, the URL, every redirect and the connected address must be
+    public; used for links taken from feed content rather than the user's feed list.
     """
     _check_http_url(url)
     if public_only:
         _check_public_host(url)
+    # The socket timeout only limits each single read, and a server trickling
+    # bytes (in headers, chunk sizes or the body) can keep resetting it. Running
+    # the request in a daemon thread bounds the total wait no matter where it stalls;
+    # an abandoned thread ends with its socket timeout or when the program exits.
+    result: dict = {}
+
+    def fetch():
+        try:
+            result["data"] = _fetch(url, public_only)
+        except BaseException as exc:
+            result["error"] = exc
+
+    worker = threading.Thread(target=fetch, daemon=True)
+    worker.start()
+    worker.join(MAX_DOWNLOAD_SECONDS)
+    if worker.is_alive():
+        raise TimeoutError(f"download took longer than {MAX_DOWNLOAD_SECONDS} s: {url}")
+    if "error" in result:
+        raise result["error"]
+    return result["data"]
+
+
+def _fetch(url: str, public_only: bool) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     request.public_only = public_only
-    with _opener().open(request, timeout=TIMEOUT_SECONDS) as response:
+    opener = _public_opener() if public_only else _opener()
+    with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
         data = response.read(MAX_FEED_BYTES + 1)
     if len(data) > MAX_FEED_BYTES:
         raise ValueError(f"response is larger than {MAX_FEED_BYTES // (1024 * 1024)} MB")

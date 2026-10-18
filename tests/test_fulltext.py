@@ -71,6 +71,6 @@ def test_fill_short_articles_keeps_feed_text_when_page_has_less(monkeypatch):
 
 def test_fill_short_articles_does_not_fetch_internal_addresses(monkeypatch):
     monkeypatch.setattr(feeds.socket, "getaddrinfo", lambda host, port: [(None, None, None, "", ("127.0.0.1", 0))])
-    monkeypatch.setattr(feeds, "_opener", lambda: pytest.fail("internal address was fetched"))
+    monkeypatch.setattr(feeds, "_public_opener", lambda: pytest.fail("internal address was fetched"))
     [article] = fill_short_articles([make("Just an excerpt.", link="http://localhost/admin")])
     assert article.text == "Just an excerpt."

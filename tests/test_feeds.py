@@ -1,4 +1,6 @@
 import io
+import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -178,14 +180,14 @@ def _resolve_to(monkeypatch, address):
 @pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.5", "192.168.1.1", "169.254.169.254", "::1", "fe80::1%en0"])
 def test_public_only_download_refuses_internal_addresses(monkeypatch, address):
     _resolve_to(monkeypatch, address)
-    monkeypatch.setattr(feeds, "_opener", lambda: pytest.fail("internal address was fetched"))
+    monkeypatch.setattr(feeds, "_public_opener", lambda: pytest.fail("internal address was fetched"))
     with pytest.raises(ValueError, match="non-public"):
         feeds.download("http://intranet.example/page", public_only=True)
 
 
 def test_public_only_download_allows_public_addresses(monkeypatch):
     _resolve_to(monkeypatch, "93.184.216.34")
-    monkeypatch.setattr(feeds, "_opener", lambda: _FakeOpener(b"<p>ok</p>"))
+    monkeypatch.setattr(feeds, "_public_opener", lambda: _FakeOpener(b"<p>ok</p>"))
     assert feeds.download("https://example.com/post", public_only=True) == b"<p>ok</p>"
 
 
@@ -202,3 +204,116 @@ def test_feed_list_urls_may_point_to_local_hosts(monkeypatch):
     # Feed URLs come from the user's own feeds.txt, so a local feed server is fine.
     monkeypatch.setattr(feeds, "_opener", lambda: _FakeOpener(b"<rss/>"))
     assert feeds.download("http://localhost:8000/feed") == b"<rss/>"
+
+
+class _StallingOpener:
+    def __init__(self):
+        self.release = threading.Event()
+
+    def open(self, request, timeout):
+        self.release.wait(5)  # a server that never finishes answering
+        return _FakeResponse(b"<rss/>")
+
+
+def test_download_gives_up_after_total_deadline(monkeypatch):
+    monkeypatch.setattr(feeds, "MAX_DOWNLOAD_SECONDS", 0.2)
+    opener = _StallingOpener()
+    monkeypatch.setattr(feeds, "_opener", lambda: opener)
+    start = time.perf_counter()
+    try:
+        with pytest.raises(TimeoutError):
+            feeds.download("https://example.com/feed")
+    finally:
+        opener.release.set()
+    assert time.perf_counter() - start < 2
+
+
+def test_download_reraises_errors_from_the_worker(monkeypatch):
+    monkeypatch.setattr(feeds, "_opener", lambda: _FakeOpener(b"x" * 11))
+    monkeypatch.setattr(feeds, "MAX_FEED_BYTES", 10)
+    with pytest.raises(ValueError, match="larger than"):
+        feeds.download("https://example.com/feed")
+
+
+class _FakeSocket:
+    def __init__(self, peer):
+        self.peer = peer
+        self.closed = False
+
+    def getpeername(self):
+        return self.peer
+
+    def setsockopt(self, *args):
+        pass
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.mark.parametrize("peer, allowed", [(("127.0.0.1", 80), False), (("93.184.216.34", 80), True)])
+def test_public_connection_checks_the_address_actually_connected_to(peer, allowed):
+    # DNS rebinding: the up-front lookup said "public", the real connection didn't.
+    connection = feeds._PublicHTTPConnection("rebind.example")
+    sock = _FakeSocket(peer)
+    connection._create_connection = lambda *args, **kwargs: sock
+    if allowed:
+        connection.connect()
+        assert not sock.closed
+    else:
+        with pytest.raises(ValueError, match="non-public"):
+            connection.connect()
+        assert sock.closed
+
+
+def test_public_opener_uses_checked_connections_and_no_proxy(monkeypatch):
+    monkeypatch.setattr(feeds, "_ssl_context", lambda: feeds.ssl.SSLContext(feeds.ssl.PROTOCOL_TLS_CLIENT))
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:3128")
+    handlers = feeds._public_opener.__wrapped__().handlers
+    assert any(isinstance(h, feeds._PublicHTTPHandler) for h in handlers)
+    assert any(isinstance(h, feeds._PublicHTTPSHandler) for h in handlers)
+    assert not any(isinstance(h, feeds.urllib.request.ProxyHandler) for h in handlers)
+
+
+class _FakeTLSContext:
+    verify_mode = feeds.ssl.CERT_REQUIRED
+    check_hostname = True
+    post_handshake_auth = None
+
+    def set_alpn_protocols(self, protocols):
+        pass
+
+    def wrap_socket(self, sock, server_hostname=None):
+        return sock
+
+
+@pytest.mark.parametrize("peer, allowed", [(("10.0.0.1", 443), False), (("93.184.216.34", 443), True)])
+def test_public_https_connection_checks_peer_after_tls_setup(peer, allowed):
+    connection = feeds._PublicHTTPSConnection("rebind.example", context=_FakeTLSContext())
+    sock = _FakeSocket(peer)
+    connection._create_connection = lambda *args, **kwargs: sock
+    if allowed:
+        connection.connect()
+        assert connection.sock is sock and not sock.closed
+    else:
+        with pytest.raises(ValueError, match="non-public"):
+            connection.connect()
+        assert sock.closed
+
+
+@pytest.mark.parametrize(
+    "address, allowed",
+    [
+        ("::ffff:127.0.0.1", False),
+        ("::127.0.0.1", False),
+        ("2002:7f00:1::", False),
+        ("64:ff9b::7f00:1", False),
+        ("::ffff:93.184.216.34", True),
+        ("2606:4700::1111", True),
+    ],
+)
+def test_ipv6_addresses_with_embedded_ipv4_are_judged_by_it(address, allowed):
+    if allowed:
+        feeds._check_public_address(address, "x")
+    else:
+        with pytest.raises(ValueError, match="non-public"):
+            feeds._check_public_address(address, "x")
