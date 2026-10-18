@@ -163,3 +163,42 @@ def test_untitled_feed_is_named_after_its_host():
     [article] = parse_feed(feed, feed_url="https://blog.example.com/rss")
     assert article.source == "blog.example.com"
     assert article.feed_url == "https://blog.example.com/rss"
+
+
+def test_parse_feed_rejects_utf16_entity_declarations():
+    bomb = '<?xml version="1.0" encoding="utf-16"?><!DOCTYPE rss [<!ENTITY a "lol">]><rss><channel><title>&a;</title></channel></rss>'
+    with pytest.raises(ValueError, match="entities"):
+        parse_feed(bomb.encode("utf-16"))
+
+
+def _resolve_to(monkeypatch, address):
+    monkeypatch.setattr(feeds.socket, "getaddrinfo", lambda host, port: [(None, None, None, "", (address, 0))])
+
+
+@pytest.mark.parametrize("address", ["127.0.0.1", "10.0.0.5", "192.168.1.1", "169.254.169.254", "::1", "fe80::1%en0"])
+def test_public_only_download_refuses_internal_addresses(monkeypatch, address):
+    _resolve_to(monkeypatch, address)
+    monkeypatch.setattr(feeds, "_opener", lambda: pytest.fail("internal address was fetched"))
+    with pytest.raises(ValueError, match="non-public"):
+        feeds.download("http://intranet.example/page", public_only=True)
+
+
+def test_public_only_download_allows_public_addresses(monkeypatch):
+    _resolve_to(monkeypatch, "93.184.216.34")
+    monkeypatch.setattr(feeds, "_opener", lambda: _FakeOpener(b"<p>ok</p>"))
+    assert feeds.download("https://example.com/post", public_only=True) == b"<p>ok</p>"
+
+
+def test_public_only_redirect_to_internal_address_is_refused(monkeypatch):
+    _resolve_to(monkeypatch, "127.0.0.1")
+    handler = feeds._HttpOnlyRedirectHandler()
+    request = feeds.urllib.request.Request("https://example.com/post")
+    request.public_only = True
+    with pytest.raises(ValueError, match="non-public"):
+        handler.redirect_request(request, None, 302, "Found", {}, "http://localhost/admin")
+
+
+def test_feed_list_urls_may_point_to_local_hosts(monkeypatch):
+    # Feed URLs come from the user's own feeds.txt, so a local feed server is fine.
+    monkeypatch.setattr(feeds, "_opener", lambda: _FakeOpener(b"<rss/>"))
+    assert feeds.download("http://localhost:8000/feed") == b"<rss/>"

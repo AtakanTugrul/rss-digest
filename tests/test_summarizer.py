@@ -57,3 +57,16 @@ def test_split_sentences_keeps_abbreviations_and_initials_together():
         "Then he left.",
         "See Fig. 3 for details.",
     ]
+
+
+def test_single_capital_letter_still_ends_a_sentence():
+    assert split_sentences("We chose plan B. Then it failed.") == ["We chose plan B.", "Then it failed."]
+
+
+def test_split_sentences_stays_fast_on_hostile_text():
+    import time
+
+    start = time.perf_counter()
+    split_sentences(" ".join(f"Dr. X{i}" for i in range(20000)))
+    split_sentences("A." * 20000)
+    assert time.perf_counter() - start < 1

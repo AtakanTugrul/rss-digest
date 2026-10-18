@@ -52,7 +52,9 @@ broken is skipped with a warning; the rest of the digest is still produced.
 
 Feed content is treated as untrusted: titles and summaries are Markdown-escaped,
 only `http(s)` links are rendered and followed (redirects included), feeds that
-declare XML entities are refused, and downloads are capped at 5 MB.
+declare XML entities are refused, and downloads are capped at 5 MB. With
+`--full-text`, article links (and their redirects) that resolve to loopback,
+private or link-local addresses are not fetched.
 
 ## How the summarizer works
 

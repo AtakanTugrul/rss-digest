@@ -85,9 +85,9 @@ def fill_short_articles(articles: list[Article], min_chars: int = MIN_FEED_CHARS
     for article in articles:
         if len(article.text) < min_chars and article.link:
             try:
-                page = feeds.download(article.link).decode("utf-8", errors="replace")
+                page = feeds.download(article.link, public_only=True).decode("utf-8", errors="replace")
                 text = extract_article_text(page)
-            except Exception as exc:  # network errors, HTTP errors, non-http(s) links
+            except Exception as exc:  # network errors, HTTP errors, non-http(s) or non-public links
                 logger.warning("Keeping feed text for %s: %s", article.link, exc)
             else:
                 if len(text) > len(article.text):

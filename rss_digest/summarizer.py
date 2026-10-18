@@ -35,25 +35,28 @@ _LEAD_BONUS = (0.3, 0.15)
 
 
 # A piece ending like this was split at an abbreviation ("Dr. Smith") or at
-# initials ("the U.S. Army"), not at the end of a sentence. The trade-off: a
+# initials ("the U.S. Army"), not at the end of a sentence. Initials need at
+# least two letters, so "plan B." still ends a sentence. The trade-off: a
 # sentence that really ends in "U.S." gets joined to the next one.
 _ABBREVIATION_END = re.compile(
-    r"(?:\b(?:[Dd]r|[Mm]rs?|[Mm]s|[Pp]rof|[Ss]t|[Jj]r|[Ss]r|vs|[Ff]igs?|[Ii]nc|[Ll]td|approx)|(?:\b[A-Z]\.)*\b[A-Z])\.$"
+    r"(?:\b(?:[Dd]r|[Mm]rs?|[Mm]s|[Pp]rof|[Ss]t|[Jj]r|[Ss]r|vs|[Ff]igs?|[Ii]nc|[Ll]td|approx)|\b[A-Z]\.(?:[A-Z]\.)*[A-Z])\.$"
 )
+# Only the end of a piece is checked, so long or hostile text stays linear.
+_ABBREVIATION_TAIL = 32
 
 
 def split_sentences(text: str) -> list[str]:
     sentences = []
     for paragraph in text.splitlines():
-        merged: list[str] = []
+        merged: list[list[str]] = []
         for piece in (s.strip() for s in _SENTENCE_END.split(paragraph)):
             if not piece:
                 continue
-            if merged and _ABBREVIATION_END.search(merged[-1]):
-                merged[-1] += " " + piece
+            if merged and _ABBREVIATION_END.search(merged[-1][-1][-_ABBREVIATION_TAIL:]):
+                merged[-1].append(piece)
             else:
-                merged.append(piece)
-        sentences.extend(merged)
+                merged.append([piece])
+        sentences.extend(" ".join(parts) for parts in merged)
     return sentences
 
 

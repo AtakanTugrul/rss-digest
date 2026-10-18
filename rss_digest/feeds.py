@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import functools
+import ipaddress
 import logging
+import socket
 import ssl
 import urllib.parse
 import urllib.request
@@ -27,6 +29,10 @@ _BLOCK_TAGS = {
     "ul", "ol", "li", "dl", "dt", "dd", "table", "tr", "td", "th", "caption",
     "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "figure", "figcaption",
 }
+# "<!ENTITY" as it appears in the encodings an XML parser detects on its own.
+_ENTITY_MARKERS = tuple(
+    "<!ENTITY".encode(encoding) for encoding in ("utf-8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")
+)
 # Code blocks don't summarize well, so they are dropped along with scripts and styles.
 _SKIP_TAGS = {"script", "style", "pre"}
 
@@ -105,12 +111,33 @@ def _check_http_url(url: str) -> None:
         raise ValueError(f"only http(s) URLs are supported: {url}")
 
 
+def _check_public_host(url: str) -> None:
+    """Refuse hosts that resolve to loopback, private or link-local addresses.
+
+    Article links come from untrusted feeds, so without this a feed could make
+    the tool fetch e.g. http://localhost/admin and put the page in the digest.
+    """
+    host = urllib.parse.urlparse(url).hostname
+    if not host:
+        raise ValueError(f"URL has no host: {url}")
+    for *_, sockaddr in socket.getaddrinfo(host, None):
+        address = ipaddress.ip_address(sockaddr[0].split("%", 1)[0])
+        if not address.is_global:
+            raise ValueError(f"refusing non-public address {address} for {url}")
+
+
 class _HttpOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Follow redirects only to http(s); urllib would otherwise also follow ftp://."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _check_http_url(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        public_only = getattr(req, "public_only", False)
+        if public_only:
+            _check_public_host(newurl)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None:
+            new.public_only = public_only
+        return new
 
 
 @functools.cache
@@ -122,10 +149,17 @@ def _opener() -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), _HttpOnlyRedirectHandler)
 
 
-def download(url: str) -> bytes:
-    """Download a feed or page over http(s), refusing anything over MAX_FEED_BYTES."""
+def download(url: str, public_only: bool = False) -> bytes:
+    """Download a feed or page over http(s), refusing anything over MAX_FEED_BYTES.
+
+    With public_only, the URL and every redirect must point to a public address;
+    used for links taken from feed content rather than from the user's feed list.
+    """
     _check_http_url(url)
+    if public_only:
+        _check_public_host(url)
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    request.public_only = public_only
     with _opener().open(request, timeout=TIMEOUT_SECONDS) as response:
         data = response.read(MAX_FEED_BYTES + 1)
     if len(data) > MAX_FEED_BYTES:
@@ -137,7 +171,8 @@ def parse_feed(raw: bytes | str, limit: int | None = None, feed_url: str = "") -
     """Parse feed content (RSS or Atom) into articles, newest entries first as given by the feed."""
     # Real feeds don't declare their own entities; refusing them rules out
     # "billion laughs" style expansion regardless of the XML parser version.
-    if (b"<!ENTITY" if isinstance(raw, bytes) else "<!ENTITY") in raw:
+    markers = _ENTITY_MARKERS if isinstance(raw, bytes) else ("<!ENTITY",)
+    if any(marker in raw for marker in markers):
         raise ValueError("feeds that declare XML entities are not supported")
     feed = feedparser.parse(raw)
     if feed.bozo and not feed.entries:

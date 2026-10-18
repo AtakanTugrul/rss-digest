@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from rss_digest import feeds
 from rss_digest.feeds import Article
 from rss_digest.fulltext import extract_article_text, fill_short_articles
@@ -38,7 +40,8 @@ def test_extract_falls_back_to_all_paragraphs_without_article_tag():
 def test_fill_short_articles_replaces_excerpts_only(monkeypatch):
     fetched = []
 
-    def fake_download(url):
+    def fake_download(url, public_only=False):
+        assert public_only
         fetched.append(url)
         return PAGE.encode()
 
@@ -51,7 +54,7 @@ def test_fill_short_articles_replaces_excerpts_only(monkeypatch):
 
 
 def test_fill_short_articles_keeps_feed_text_on_errors(monkeypatch, caplog):
-    def fake_download(url):
+    def fake_download(url, public_only=False):
         raise OSError("timed out")
 
     monkeypatch.setattr(feeds, "download", fake_download)
@@ -61,6 +64,13 @@ def test_fill_short_articles_keeps_feed_text_on_errors(monkeypatch, caplog):
 
 
 def test_fill_short_articles_keeps_feed_text_when_page_has_less(monkeypatch):
-    monkeypatch.setattr(feeds, "download", lambda url: b"<p>tiny</p>")
+    monkeypatch.setattr(feeds, "download", lambda url, public_only=False: b"<p>tiny</p>")
     [article] = fill_short_articles([make("Just an excerpt.")])
+    assert article.text == "Just an excerpt."
+
+
+def test_fill_short_articles_does_not_fetch_internal_addresses(monkeypatch):
+    monkeypatch.setattr(feeds.socket, "getaddrinfo", lambda host, port: [(None, None, None, "", ("127.0.0.1", 0))])
+    monkeypatch.setattr(feeds, "_opener", lambda: pytest.fail("internal address was fetched"))
+    [article] = fill_short_articles([make("Just an excerpt.", link="http://localhost/admin")])
     assert article.text == "Just an excerpt."
